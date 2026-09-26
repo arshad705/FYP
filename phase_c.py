@@ -13,16 +13,20 @@ Pipeline
     6. Plot         Fig. 2 (v_{k,T}) and Fig. 3 (|z_check| vs threshold)
 
 Assumptions not stated in [1] (to confirm with supervisor):
-    - u_i = 0: [1] eqs. (1), (4), (21) have no input term, and no load profile covers 1e5 steps.
+    - u_i = dP_L_i from [5] Table 5 (Scenario 3 load steps, held after k = 40), entering plant and
+      estimator through Bbar_i as in [1] eq. (30); run with --no-load for u_i = 0, or with
+      --load-after-fault to apply the same steps starting just after k_bar.
     - Discretisation: Phase B's per-area ZOH; post-fault area 5 re-discretised on its own.
     - Fig. 3 baseline: |z_check_{i,l}| against a constant alpha_1 = 4.57 ([1] Fig. 3 caption),
       with [2]'s 1% value 2.57 shown dashed.
     - x(0) = x_hat(0) = 0 as in [2] Sec. V (residual variance settles within 3 steps).
 
-Run phase_a.py and phase_b.py first.
-Output: phase_c_results.npz, fig2_statistical.png, fig3_residual.png.
+Run phase_a.py and phase_b.py first.  Usage: python phase_c.py [--no-load | --load-after-fault]
+Output: phase_c_results<suffix>.npz, fig2_statistical<suffix>.png, fig3_residual<suffix>.png,
+        suffix "_load", "_load_after_fault" or "_noload".
 """
 
+import sys
 import numpy as np
 from pathlib import Path
 import matplotlib
@@ -37,38 +41,61 @@ SEED:       int   = 20260926
 ALPHA_1:    float = 4.57         # [1] Fig. 3 caption
 ALPHA_BOEM: float = 2.57         # [2] Sec. V, 1% false-alarm threshold
 
+# [5] Table 5: (step time k, area, dP_L step in p.u.); each step persists
+LOAD_STEPS: list[tuple[int, int, float]] = [
+    (5, 1, +0.12), (15, 2, -0.15), (20, 5, +0.20), (40, 2, +0.15), (40, 3, +0.13), (40, 5, -0.20),
+]
+
 RESULTS_DIR = Path(__file__).parent
 FIRST_V = WINDOW_LEN + BLOCK_LEN - 2         # first k with a valid v_{k,T} (Phase A check [4])
 
 
 # Step 1 — Load Phase B output back into the dict layout of phase_b.py
 def load_gains(path: Path) -> dict:
-    """Returns A[i][j], A_fault[i][j], L[i][j], Gamma_inv_sqrt[i] for j in N_i U {i}, plus C, Q, R."""
+    """Returns A[i][j], A_fault[i][j], Bbar[i], Bbar_fault[i], L[i][j], Gamma_inv_sqrt[i], plus C, Q, R."""
     d = np.load(path)
-    A, L, G = {}, {}, {}
+    A, L, G, Bbar = {}, {}, {}, {}
     for i in AREAS:
         A[i] = {j: d[f"A_{i}_{j}"] for j in [i] + NEIGHBOURS[i]}
         L[i] = {j: d[f"L_{i}_{j}"] for j in [i] + NEIGHBOURS[i]}
         G[i] = d[f"Gamma_inv_sqrt_{i}"]
+        Bbar[i] = d[f"Bbar_{i}"][:, 0]
     A_fault = {i: dict(A[i]) for i in AREAS}
     for j in [5] + NEIGHBOURS[5]:                     # H5 appears only in area 5's row (Phase B check [3])
         A_fault[5][j] = d[f"Afault_5_{j}"]
-    return dict(A=A, A_fault=A_fault, L=L, Gamma_inv_sqrt=G, C=d["C"], Q=d["Q"], R=d["R"])
+    Bbar_fault = dict(Bbar)
+    Bbar_fault[5] = d["Bbarfault_5"][:, 0]
+    return dict(A=A, A_fault=A_fault, Bbar=Bbar, Bbar_fault=Bbar_fault, L=L, Gamma_inv_sqrt=G,
+                C=d["C"], Q=d["Q"], R=d["R"])
+
+
+def load_profile(n_steps: int = N_STEPS, steps: list = LOAD_STEPS, offset: int = 0) -> dict:
+    """
+    u_i(k) = dP_L_i(k): cumulative sum of the step changes, shifted by offset, shape (n_steps,) per area.
+    H_i only scales the swing equation, so a load held constant leaves the equilibrium unchanged by the
+    fault; only load steps while the fault is active change the residual.
+    """
+    u = {i: np.zeros(n_steps) for i in AREAS}
+    for k, i, du in steps:
+        u[i][k + offset:] += du
+    return u
 
 
 # Steps 2-4 — Simulate plant and estimators, return normalised residuals
-def simulate(gains: dict, n_steps: int = N_STEPS, fault_k: int = FAULT_K, seed: int = SEED) -> dict:
+def simulate(gains: dict, u: dict | None = None, n_steps: int = N_STEPS, fault_k: int = FAULT_K,
+             seed: int = SEED) -> tuple[dict, dict]:
     """
     At each k, in this order:
         y_i(k)       = C x_i(k) + v_i(k)                                   [1] eq. (30)
         z~_i(k)      = y_i(k) - C x_hat_i(k)                               local residual, z_i = y_i
         z_check_i(k) = Gamma_i^{-1/2} z~_i(k)                              [1] eq. (10)
-        x_hat_i(k+1) = sum_{j in N_i U {i}} A_ij x_hat_j(k) + L_ij z~_j(k)   [1] eq. (4), nominal A
-        x_i(k+1)     = sum_{j in N_i U {i}} A_ij(k) x_j(k) + w_i(k)          A_ij(k) post-fault for k > fault_k
-    The estimator keeps the pre-fault model: that mismatch is the anomaly.
-    Returns z_check[i], shape (n_steps, 2), for each area.
+        x_hat_i(k+1) = sum_j A_ij x_hat_j(k) + L_ij z~_j(k) + Bbar_i u_i(k)  [1] eq. (4), nominal model
+        x_i(k+1)     = sum_j A_ij(k) x_j(k) + Bbar_i(k) u_i(k) + w_i(k)      post-fault for k > fault_k
+    The estimator keeps the pre-fault model: that mismatch is the anomaly. u = None means u_i = 0.
+    Returns z_check[i], shape (n_steps, 2), and the true state x[i], shape (n_steps, 4).
     """
     A, A_fault, L = gains["A"], gains["A_fault"], gains["L"]
+    Bbar, Bbar_fault = gains["Bbar"], gains["Bbar_fault"]
     C, G = gains["C"], gains["Gamma_inv_sqrt"]
     n_out, n_state = C.shape
 
@@ -81,9 +108,14 @@ def simulate(gains: dict, n_steps: int = N_STEPS, fault_k: int = FAULT_K, seed: 
     x = {i: np.zeros(n_state) for i in AREAS}
     x_hat = {i: np.zeros(n_state) for i in AREAS}
     z_check = {i: np.zeros((n_steps, n_out)) for i in AREAS}
+    x_log = {i: np.zeros((n_steps, n_state)) for i in AREAS}
+    if u is None:
+        u = {i: np.zeros(n_steps) for i in AREAS}
 
     for k in range(n_steps):
-        A_plant = A_fault if k > fault_k else A
+        A_plant, B_plant = (A_fault, Bbar_fault) if k > fault_k else (A, Bbar)
+        for i in AREAS:
+            x_log[i][k] = x[i]
 
         # residuals of every area first: each estimator update needs its neighbours' residuals
         resid = {}
@@ -94,8 +126,8 @@ def simulate(gains: dict, n_steps: int = N_STEPS, fault_k: int = FAULT_K, seed: 
 
         new_x_hat, new_x = {}, {}
         for i in AREAS:
-            est = np.zeros(n_state)                             # [1] eq. (4)
-            plant = w[i][k].copy()                              # [1] eq. (30), u_i = 0
+            est = Bbar[i] * u[i][k]                             # [1] eq. (4) plus the known input
+            plant = w[i][k] + B_plant[i] * u[i][k]              # [1] eq. (30)
             for j in [i] + NEIGHBOURS[i]:
                 est = est + A[i][j] @ x_hat[j] + L[i][j] @ resid[j]
                 plant = plant + A_plant[i][j] @ x[j]
@@ -103,7 +135,7 @@ def simulate(gains: dict, n_steps: int = N_STEPS, fault_k: int = FAULT_K, seed: 
             new_x[i] = plant
         x, x_hat = new_x, new_x_hat
 
-    return z_check
+    return z_check, x_log
 
 
 # Step 5 — Detector per area and per output channel  [1] Alg. 2 with D = 1
@@ -181,8 +213,16 @@ if __name__ == "__main__":
     if int(stats["T"]) != WINDOW_LEN or int(stats["L"]) != BLOCK_LEN:
         raise SystemExit("detector_stats.npz was built with different T or L; re-run phase_a.py.")
 
-    print(f"\n[1] Simulating {N_STEPS} steps, fault for k > {FAULT_K}, u_i = 0")
-    z_check = simulate(gains)
+    args = sys.argv[1:]
+    use_load = "--no-load" not in args
+    offset = FAULT_K + 1 if "--load-after-fault" in args else 0
+    suffix = ("_load_after_fault" if offset else "_load") if use_load else "_noload"
+    u = load_profile(offset=offset) if use_load else None
+    print(f"\n[1] Simulating {N_STEPS} steps, fault for k > {FAULT_K}, "
+          + (f"u_i = dP_L_i from [5] Table 5, starting at k = {offset}" if use_load else "u_i = 0"))
+    z_check, x_true = simulate(gains, u)
+    for i in AREAS:
+        print(f"  area {i}: x at fault = {np.array2string(x_true[i][FAULT_K], precision=4)}")
     pre = slice(FIRST_V, FAULT_K + 1)                   # healthy data only
     post = slice(FAULT_K + 1, N_STEPS)
 
@@ -227,10 +267,10 @@ if __name__ == "__main__":
                   f"  |  > {ALPHA_1}: before {np.mean(z[pre] > ALPHA_1):.5f}, after {np.mean(z[post] > ALPHA_1):.5f}")
     print("  Theory for N(0,1): P(|z| > 2.57) = 0.0102, P(|z| > 4.57) = 4.9e-6.")
 
-    fig2, fig3 = RESULTS_DIR / "fig2_statistical.png", RESULTS_DIR / "fig3_residual.png"
+    fig2, fig3 = RESULTS_DIR / f"fig2_statistical{suffix}.png", RESULTS_DIR / f"fig3_residual{suffix}.png"
     plot_fig2(det["v"], fig2)
     plot_fig3(z_check, fig3)
-    np.savez(RESULTS_DIR / "phase_c_results.npz",
+    np.savez(RESULTS_DIR / f"phase_c_results{suffix}.npz",
              **{f"zcheck_{i}": z_check[i] for i in AREAS},
              **{f"v_{i}_{l}": det["v"][(i, l)] for i in AREAS for l in [1, 2]},
              fault_k=FAULT_K, n_steps=N_STEPS, seed=SEED)
