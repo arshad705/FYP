@@ -9,7 +9,7 @@ Script: [`phase_b.py`](../phase_b.py) · Model: [5] Scenario 3, [1] Sec. V · Es
 2. **Design the estimators.** Design one state estimator per area, each using only local
    measurements and its neighbours' measurements (distributed, not centralised).
 
-These matrices are what Phase C will simulate. Under nominal conditions each
+These matrices are what [Phase C](phase_c.md) simulates. Under nominal conditions each
 estimator's normalised residual $\Gamma_i^{-1/2}(y_i - C\hat x_i)$ should be
 white $\mathcal N(0, I)$, which is exactly what the Phase A detector tests.
 

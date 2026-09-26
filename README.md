@@ -7,7 +7,7 @@ test on its residuals.
 ## How the pieces fit
 
 ```
- Phase B: plant + estimator          Phase C (planned)                 Phase A: detector
+ Phase B: plant + estimator          Phase C: simulation               Phase A: detector
  ─────────────────────────           ─────────────────────             ─────────────────
  power network model   ──gains──▶    simulate network, run     ──z──▶  is z still i.i.d. N(0,1)?
  per-area estimator                  estimators, normalise              → v, psi, alarm
@@ -18,7 +18,16 @@ test on its residuals.
 |---|---|---|---|
 | **A** | [`phase_a.py`](phase_a.py) | Build the statistical detector and check it on synthetic residuals where the correct answer is known. | `detector_stats.npz` |
 | **B** | [`phase_b.py`](phase_b.py) | Build the 4-area power network model (plus a post-fault version) and design one estimator per area. | `estimator_gains.npz` |
-| C | not yet written | Connect B to A: simulate the network, feed the normalised residuals into the detector. | — |
+| **C** | [`phase_c.py`](phase_c.py) | Connect B to A: simulate the network with the inertia fault, feed each area's normalised residual into the detector, and reproduce [1] Figs. 2 and 3. | `phase_c_results.npz`, `fig2_statistical.png`, `fig3_residual.png` |
+
+## Current result
+
+The statistical detector finds the fault that a simple threshold misses, as [1] claims:
+
+- **Statistical test ([1] Fig. 2):** in area 5's frequency channel, $v_{k,T}$ jumps from about 100 to about 350 after the fault, and the alarm stays on. The other areas stay near 100.
+- **Threshold test ([1] Fig. 3):** with the paper's threshold of 4.57, only 0.04 % of post-fault steps cross it, so the fault is effectively missed.
+
+Two details don't yet match the paper: area 5's angle channel doesn't respond, and there is no residual spike at the fault. See [docs/phase_c.md](docs/phase_c.md#open-gaps) for the open gaps.
 
 If the estimator from Phase B is working and nothing is wrong, its normalised
 residual is white Gaussian noise. Phase A's detector checks exactly that, so a
@@ -35,16 +44,18 @@ pip install -r requirements.txt
 
 python phase_b.py               # fast
 python phase_a.py               # slower: k-means + several 100 000-step detector runs
+python phase_c.py               # slowest: 100 000-step network simulation; needs A and B first
 ```
 
 Each script prints a numbered list of validation checks, each marked `[OK]` or
-`[FAIL]`, then saves its `.npz` file next to the script. The `.npz` files are
-generated, so they are not committed (see `.gitignore`).
+`[FAIL]`, then saves its output next to the script. The `.npz` files and figures
+are generated, so they are not committed (see `.gitignore`).
 
 ## Documentation
 
 - [docs/phase_a.md](docs/phase_a.md): detector objective, method, symbols, how to read the output
 - [docs/phase_b.md](docs/phase_b.md): plant model, estimator design, symbols, how to read the output
+- [docs/phase_c.md](docs/phase_c.md): simulation, results against the paper, significance, open gaps
 
 ## References
 
