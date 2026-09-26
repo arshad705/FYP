@@ -2,3 +2,4 @@
 *.npz
 *.pdf
 *.docx
+__pycache__/
