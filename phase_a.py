@@ -1,36 +1,18 @@
 """
-phaseA.py — Phase A: Statistical Anomaly Detector (synthetic data)
-================================================================================
-Source: Yan, Fu & Seron, IEEE ICCA 2024 [1], Section III and Algorithm 2,
-        which restates Marelli, Sui, Fu & Lu, IEEE TAC 66(2), 2021 [3], Sec. VII.
+phase_a.py — Phase A: statistical anomaly detector, tested on synthetic residuals.
 
-Builds and verifies the detector with no plant model attached. The residual
-z_check is supplied directly (synthetic i.i.d. or synthetic correlated), so
-the detector is judged against a known truth before it is wired to the
-network in Phase C.
+Implements [1] Sec. III / Alg. 2 (Yan, Fu & Seron, ICCA 2024), which restates
+[3] Sec. VII (Marelli, Sui, Fu & Lu, IEEE TAC 2021). Validated against known
+synthetic inputs before being connected to the plant in Phase C.
 
 Pipeline
---------
-1.  Codebook      rho_m, m = 1..I, in R^{LD}          [1] Alg. 2, init step 1 (Lloyd's algorithm)
-2.  Nominal CDF   [u*]_m = prod_l Phi(rho_{m,l})      [1] eq. (19)
-3.  Covariance    Sigma = sum_{k=-(L-1)}^{L-1} Sigma(k)  [1] eq. (20), Prop. 3.1
-4.  Detector      u_{k,T}, v_{k,T}, psi_{k,T}, alarm  [1] Alg. 2, main loop steps 3-7
+    1. Codebook     rho_m in R^L via Lloyd's algorithm    [1] Alg. 2 init
+    2. Nominal CDF  [u*]_m = prod_l Phi(rho_{m,l})         [1] eq. (19)
+    3. Covariance   Sigma = sum_{|k|<L} Sigma(k)           [1] eq. (20)
+    4. Detector     u, v, psi, alarm                        [1] Alg. 2 steps 3-7
 
-Fixed parameters  [1] Sec. V:  L = 3, T = 800, I = 100, D = 1 (per-channel test)
-
-Key functions
--------------
-build_codebook(I, L, seed)                 — Lloyd's algorithm (k-means) on N(0, I_L)
-nominal_cdf_vector(codebook)              — u*
-nominal_covariance(codebook)              — Sigma, closed form
-nominal_covariance_mc(codebook, n, seed)  — Sigma, Monte Carlo (verification only)
-run_detector(residual, stats, T, alpha)   — v_{k,T}, psi_{k,T}, alarm for a whole residual sequence
-load_stats(path) / save_stats(path, ...)  — cache codebook, u*, Sigma, Sigma_inv
-
-Saved outputs
--------------
-  detector_stats.npz (next to this script)
-  Keys: codebook, u_star, Sigma, Sigma_inv, L, T, I
+Parameters [1] Sec. V: L = 3, T = 800, I = 100, D = 1.
+Output: detector_stats.npz (codebook, u_star, Sigma, Sigma_inv, L, T, I).
 """
 
 import numpy as np
@@ -38,77 +20,46 @@ from pathlib import Path
 from scipy.stats import norm, chi2, kstest
 from sklearn.cluster import KMeans
 
-# ---------------------------------------------------------------------------
-# Fixed parameters  [1] Sec. V
-# ---------------------------------------------------------------------------
 BLOCK_LEN:   int   = 3       # L
 WINDOW_LEN:  int   = 800     # T
 N_CODEBOOK:  int   = 100     # I
-ALPHA:       float = 0.99    # alarm threshold on psi; asymptotic false alarm rate = 1 - ALPHA
+ALPHA:       float = 0.99    # alarm if psi >= ALPHA (false-alarm rate ~ 1 - ALPHA)
 SEED:        int   = 20260906
-N_TRAIN:     int   = 100_000 # Lloyd training set size
+N_TRAIN:     int   = 100_000 # Lloyd training samples
 
 RESULTS_DIR = Path(__file__).parent
 
 
-# ---------------------------------------------------------------------------
-# Step 1 — Codebook   [1] Alg. 2, initialisation step 1
-# ---------------------------------------------------------------------------
+# Step 1 — Codebook  [1] Alg. 2 init
 def build_codebook(
     n_points: int = N_CODEBOOK,
     block_len: int = BLOCK_LEN,
     seed: int = SEED,
     n_train: int = N_TRAIN,
 ) -> np.ndarray:
-    """
-    Run Lloyd's algorithm on the L-dimensional distribution N(0, I) to obtain
-    rho_m, m = 1..I.  With squared-error distortion Lloyd's algorithm is
-    k-means, so: draw n_train samples from N(0, I_L), fit k-means with I
-    clusters, return the cluster centres.
-
-    Returns
-    -------
-    codebook : (I, L) array; row m is rho_m = [rho_{m,0}, ..., rho_{m,L-1}]
-    """
+    """Lloyd's algorithm (= k-means) on samples of N(0, I_L). Returns (I, L); row m is rho_m."""
     rng = np.random.default_rng(seed)
     training_samples = rng.standard_normal((n_train, block_len))
     km = KMeans(n_clusters=n_points, n_init=10, random_state=seed).fit(training_samples)
     return np.asarray(km.cluster_centers_, dtype=float)
 
 
-# ---------------------------------------------------------------------------
-# Step 2 — Nominal CDF vector   [1] eq. (19)
-# ---------------------------------------------------------------------------
+# Step 2 — Nominal CDF vector  [1] eq. (19)
 def nominal_cdf_vector(codebook: np.ndarray) -> np.ndarray:
-    """
-    [u*]_m = prod_{l=0}^{L-1} Phi(rho_{m,l})
-
-    Probability that a block of L i.i.d. N(0,1) samples is component-wise
-    below rho_m.  D = 1, so Phi is the scalar standard normal CDF.
-    """
+    """[u*]_m = prod_l Phi(rho_{m,l}) = P(block of L i.i.d. N(0,1) samples <= rho_m)."""
     return norm.cdf(codebook).prod(axis=1)
 
 
-# ---------------------------------------------------------------------------
-# Step 3 — Covariance matrix   [1] eq. (20), Proposition 3.1
-# ---------------------------------------------------------------------------
+# Step 3 — Covariance  [1] eq. (20), Prop. 3.1
 def nominal_covariance(codebook: np.ndarray) -> np.ndarray:
     """
-    Sigma = sum_{lag = -(L-1)}^{L-1} ( E[xi_lag xi_0^T] - u* u*^T )
+    Sigma = sum_{|lag|<L} (E[xi_lag xi_0^T] - u* u*^T),  [xi_k]_m = 1{samples k..k+L-1 <= rho_m}.
 
-    where [xi_k]_m = 1{ block_k <= rho_m } and block_k = samples k .. k+L-1.
-
-    Block 0 covers samples 0..L-1, block lag covers samples lag..lag+L-1,
-    so they share L - |lag| samples.  E[[xi_lag]_m [xi_0]_n] is a product over
-    every sample time t touched by either block:
-        t in both blocks  -> must be below both bounds -> Phi( min(rho_{m,t-lag}, rho_{n,t}) )
-        t only in block 0 -> Phi( rho_{n,t} )
-        t only in block lag -> Phi( rho_{m,t-lag} )
-    For |lag| >= L the blocks share nothing and the term vanishes, hence the
-    finite sum (5 terms for L = 3).
-
-    This is the three-case formula of [1] eq. (20) written as one rule.
-    Returns Sigma : (I, I).
+    E[[xi_lag]_m [xi_0]_n] is a product over each sample t covered by either block:
+        in both blocks   -> Phi(min(rho_{m,t-lag}, rho_{n,t}))
+        block 0 only     -> Phi(rho_{n,t})
+        block lag only   -> Phi(rho_{m,t-lag})
+    This merges the three cases of [1] eq. (20) into one rule. Returns (I, I).
     """
     n_points, block_len = codebook.shape
     cdf = norm.cdf(codebook)                      # Phi(rho_{m,l}), (I, L)
@@ -135,11 +86,7 @@ def nominal_covariance_mc(
     n_samples: int = 600_000,
     seed: int = 1,
 ) -> np.ndarray:
-    """
-    Monte Carlo estimate of Sigma from simulated i.i.d. N(0,1) residuals.
-    Verification only: if this disagrees with nominal_covariance() by more
-    than a few percent, the closed form has been transcribed wrongly.
-    """
+    """Monte Carlo Sigma, used only to cross-check nominal_covariance() (should agree within a few %)."""
     n_points, block_len = codebook.shape
     residual = np.random.default_rng(seed).standard_normal(n_samples)
     blocks = np.lib.stride_tricks.sliding_window_view(residual, block_len)
@@ -155,9 +102,7 @@ def nominal_covariance_mc(
     return Sigma_mc
 
 
-# ---------------------------------------------------------------------------
-# Step 4 — Online detector   [1] Alg. 2, main loop steps 3-7
-# ---------------------------------------------------------------------------
+# Step 4 — Online detector  [1] Alg. 2 steps 3-7
 def run_detector(
     residual: np.ndarray,
     stats: dict,
@@ -165,28 +110,14 @@ def run_detector(
     alpha: float = ALPHA,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    At each time k (with tau = k - L + 1, so the newest block is
-    residual[k-L+1 .. k] and no future samples are used):
+    At each k, using the newest block residual[k-L+1..k] (causal):
+        u     = fraction of the last T blocks with block <= rho_m
+        v     = T (u - u*)^T Sigma^{-1} (u - u*)
+        psi   = chi-square CDF of v with I d.o.f.;  alarm = psi >= alpha
 
-        step 3   block     = residual[k-L+1 .. k]
-        step 4   u_{k,T}   = mean over the last T blocks of 1{block <= rho_m}
-        step 5   v_{k,T}   = T (u - u*)^T Sigma^{-1} (u - u*)
-        step 6   psi_{k,T} = H_I(v_{k,T}),  H_I = chi-square CDF with I d.o.f.
-        step 7   alarm     = psi_{k,T} >= alpha
-
-    u_{k,T} is kept as a running count over a ring of the last T indicator
-    vectors, updated by adding the entering block and subtracting the leaving
-    one.  Cost O(I L) per step.  Recomputing all T blocks per step is O(T I L)
-    and does not finish for a 1e5-step run.
-
-    Parameters
-    ----------
-    residual : 1-D array of normalised residual samples z_check(k)
-    stats    : dict with 'codebook', 'u_star', 'Sigma_inv'
-
-    Returns
-    -------
-    v, psi, alarm : arrays of len(residual); NaN / False until k = T + L - 2
+    u is updated with a ring buffer, O(I L) per step instead of O(T I L).
+    stats needs 'codebook', 'u_star', 'Sigma_inv'.
+    Returns v, psi, alarm, each NaN/False until k = T + L - 2.
     """
     codebook, u_star, Sigma_inv = stats["codebook"], stats["u_star"], stats["Sigma_inv"]
     n_points, block_len = codebook.shape
@@ -207,9 +138,6 @@ def run_detector(
     return v, psi, psi >= alpha
 
 
-# ---------------------------------------------------------------------------
-# Cache
-# ---------------------------------------------------------------------------
 def save_stats(path: Path, codebook, u_star, Sigma, Sigma_inv) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     np.savez(path, codebook=codebook, u_star=u_star, Sigma=Sigma, Sigma_inv=Sigma_inv,
@@ -221,11 +149,9 @@ def load_stats(path: Path) -> dict:
     return {k: d[k] for k in d.files}
 
 
-# ---------------------------------------------------------------------------
-# Synthetic residual generators (for validation only)
-# ---------------------------------------------------------------------------
+# Synthetic residuals for validation
 def ar1_residual(n: int, phi: float, rng) -> np.ndarray:
-    """Unit-variance AR(1): N(0,1) marginal, not i.i.d.  Invisible to an amplitude threshold."""
+    """Unit-variance AR(1): N(0,1) marginal but correlated, so a simple threshold can't see it."""
     z = rng.standard_normal(n)
     for t in range(1, n):
         z[t] = phi * z[t - 1] + np.sqrt(1 - phi ** 2) * z[t]
@@ -234,10 +160,9 @@ def ar1_residual(n: int, phi: float, rng) -> np.ndarray:
 
 def intricate_attack(nominal: np.ndarray, v_bar: float, tau_bar: int, rng, sign_set: str = "pm1") -> np.ndarray:
     """
-    Attack (27) of [1] / (15) of [3]:
-        r(k) = v_bar r(k - tau_bar) + sqrt(1 - v_bar^2) z(k),   z_a(k) = gamma(k) r(k)
-    sign_set='pm1' -> gamma in {-1,+1}  (E[gamma] = 0, which the uncorrelation proof in [3] requires)
-    sign_set='01'  -> gamma in {0,1}    (as printed in both papers; not stealthy)
+    Attack (27) of [1] / (15) of [3]:  r(k) = v_bar r(k-tau_bar) + sqrt(1-v_bar^2) z(k),  z_a = gamma r.
+    sign_set 'pm1': gamma in {-1,+1}, E[gamma] = 0 as [3]'s proof needs.
+    sign_set '01':  gamma in {0,1} as printed in the papers; not stealthy.
     """
     n = len(nominal)
     r = np.zeros(n)
@@ -248,34 +173,23 @@ def intricate_attack(nominal: np.ndarray, v_bar: float, tau_bar: int, rng, sign_
     return gamma * r
 
 
-# ---------------------------------------------------------------------------
-# __main__ — Phase A validation
-# ---------------------------------------------------------------------------
 if __name__ == "__main__":
     print("=" * 65)
     print("Phase A Validation — Statistical Detector (L=3, T=800, I=100)")
     print("=" * 65)
 
-    # ------------------------------------------------------------------
-    # Check 1: codebook
-    # ------------------------------------------------------------------
     print("\n[1] Codebook (Lloyd's algorithm)")
     codebook = build_codebook()
     print(f"  shape = {codebook.shape}, centre of mass = {np.round(codebook.mean(axis=0), 3)}  "
           f"[{'OK' if codebook.shape == (N_CODEBOOK, BLOCK_LEN) else 'WRONG'}]")
 
-    # ------------------------------------------------------------------
-    # Check 2: u*
-    # ------------------------------------------------------------------
     print("\n[2] Nominal CDF vector u*")
     u_star = nominal_cdf_vector(codebook)
     in_range = bool(np.all((u_star > 0) & (u_star < 1)))
     print(f"  all entries in (0,1): {in_range}   mean = {u_star.mean():.3f}  (theory 0.5^3 = 0.125)  "
           f"[{'OK' if in_range and 0.08 < u_star.mean() < 0.18 else 'WRONG'}]")
 
-    # ------------------------------------------------------------------
-    # Check 3: Sigma — symmetry, Bernoulli diagonal, PSD, Monte Carlo
-    # ------------------------------------------------------------------
+    # Check 3: symmetry, Bernoulli diagonal, PSD, Monte Carlo agreement
     print("\n[3] Covariance Sigma")
     Sigma = nominal_covariance(codebook)
     sym = bool(np.allclose(Sigma, Sigma.T, atol=1e-12))
@@ -294,9 +208,7 @@ if __name__ == "__main__":
     Sigma_inv = np.linalg.pinv(Sigma, rcond=1e-10, hermitian=True)
     stats = dict(codebook=codebook, u_star=u_star, Sigma_inv=Sigma_inv)
 
-    # ------------------------------------------------------------------
-    # Check 4: nominal i.i.d. input -> v ~ chi2_I
-    # ------------------------------------------------------------------
+    # Check 4: nominal input -> v ~ chi2_I
     print("\n[4] Detector on i.i.d. N(0,1) residual (100 000 steps)")
     rng = np.random.default_rng(1)
     v, psi, alarm = run_detector(rng.standard_normal(100_000), stats)
@@ -307,9 +219,7 @@ if __name__ == "__main__":
     print(f"  alarm rate at alpha = {ALPHA}: {far:.3f}  (asymptotic 1-alpha = {1-ALPHA:.2f}; a few % is the finite-T effect)"
           f"  [{'OK' if 90 < v[ok].mean() < 115 else 'FAIL'}]")
 
-    # ------------------------------------------------------------------
-    # Check 5: correlated input with identical marginal -> v rises
-    # ------------------------------------------------------------------
+    # Check 5: same marginal but correlated -> v should rise
     print("\n[5] Detector on AR(1) residual after k0 = 50 000 (N(0,1) marginal, not i.i.d.)")
     n, k0 = 100_000, 50_000
     for phi in [0.3, 0.5, 0.8]:
@@ -321,9 +231,7 @@ if __name__ == "__main__":
               f"alarm rate after {alarm[after].mean():.2f}; variance before/after {z[:k0].var():.2f}/{z[k0:].var():.2f}"
               f"  [{'OK' if np.nanmean(v[after]) > 150 else 'FAIL'}]")
 
-    # ------------------------------------------------------------------
-    # Check 6: intricate attack (27) — settles the Bernoulli question
-    # ------------------------------------------------------------------
+    # Check 6: attack (27) with gamma in {-1,+1} vs {0,1}
     print("\n[6] Intricate attack (27), tau_bar = 1, v_bar = 1/sqrt(2), T = 100 as in [3] Sec. VIII")
     n, k0 = 50_000, 25_000
     nominal = rng.standard_normal(n)
@@ -337,9 +245,6 @@ if __name__ == "__main__":
               f"lag-1 acf {np.corrcoef(post[:-1], post[1:])[0, 1]:+.3f}, KS vs N(0,1) {kstest(post, 'norm').statistic:.3f}")
     print("  -> {-1,+1} passes every simple check and is still detected; {0,1} is not stealthy at all.")
 
-    # ------------------------------------------------------------------
-    # Save
-    # ------------------------------------------------------------------
     out = RESULTS_DIR / "detector_stats.npz"
     save_stats(out, codebook, u_star, Sigma, Sigma_inv)
     print(f"\nStats saved -> {out}")
