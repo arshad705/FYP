@@ -6,16 +6,18 @@ Sources: [1] Yan, Fu & Seron, ICCA 2024, Sec. V and Alg. 1
          [5] Riverso & Ferrari-Trecate, arXiv:1207.2000, Table 2, Scenario 3
 
 Part 1 — Plant: HyCon2 Scenario 3, areas 1, 2, 3, 5 (area 4 disconnected).
-         Continuous model [5] eq. (2), ZOH-discretised per area at Ts = 1 s.
-         Fault: H5 drops from 10 to 2.
+         Continuous model [5] eq. (2), ZOH-discretised per area at Ts = 1 s (scheme Dss),
+         or the whole network at once with --scheme=D. Fault: H5 drops from 10 to 2.
 Part 2 — Estimator, [1] Alg. 1:
          1. coupling gains L_ij, then Q~_i = Q_i + sum_j L_ij R_j L_ij^T
          2. filter Riccati -> Phi_i, L_ii, Gamma_i          [1] eq. (8), (10)
          check rho(F~_ii) < 1 and beta_i < 1                [2] Prop. 1
 
-Output: estimator_gains.npz, loaded by Phase C.
+Usage: python phase_b.py [--scheme=D]
+Output: estimator_gains.npz (estimator_gains_D.npz with --scheme=D), loaded by Phase C.
 """
 
+import sys
 import numpy as np
 from pathlib import Path
 from scipy.signal import cont2discrete
@@ -118,12 +120,37 @@ def build_plant(h_override: dict[int, float] | None = None):
     return A, Bbar
 
 
+def build_plant_network(h_override: dict[int, float] | None = None, Ts: float = TS):
+    """
+    Scheme D of [5]: exact ZOH of the whole network at once. Every block A[i][j] fills in,
+    including areas with no tie line (e.g. A_13), and A_ij is no longer confined to column 0.
+    Returns A[i][j] for every pair of areas and Bbar[i] (the diagonal input blocks).
+    """
+    h_override = h_override or {}
+    n, idx = 4, {i: slice(4 * p, 4 * p + 4) for p, i in enumerate(AREAS)}
+    A_c = np.zeros((n * len(AREAS), n * len(AREAS)))
+    B_c = np.zeros((n * len(AREAS), len(AREAS)))
+    for p, i in enumerate(AREAS):
+        H = h_override.get(i)
+        A_c[idx[i], idx[i]] = A_cont_self(i, H)
+        for j in NEIGHBOURS[i]:
+            A_c[idx[i], idx[j]] = A_cont_cross(i, j, H)
+        B_c[idx[i], p] = Bbar_cont(i, H)[:, 0]
+    A_d, B_d, _, _, _ = cont2discrete((A_c, B_c, np.eye(len(A_c)), np.zeros((len(A_c), len(AREAS)))),
+                                      dt=Ts, method="zoh")
+    A = {i: {j: A_d[idx[i], idx[j]] for j in AREAS} for i in AREAS}
+    Bbar = {i: B_d[idx[i], p:p + 1] for p, i in enumerate(AREAS)}
+    return A, Bbar
+
+
 # Estimator design  [1] Alg. 1
 def coupling_gain(A_ij: np.ndarray, C_j: np.ndarray) -> np.ndarray:
     """
     Step 1: L_ij = argmin ||A_ij - L_ij C_j||_inf  ([2] Alg. 2 step (i)).
     A_ij sits in column 0 and C_j = [I_2 0], so least squares cancels it exactly
     (no LP needed). The sqrt(varsigma) scaling doesn't change the argmin.
+    Under scheme D, columns 2-3 of A_ij are unmeasured and stay; each row's L1 norm is then
+    minimised by the same L_ij = A_ij[:, :2], so least squares still solves the LP.
     """
     return A_ij @ C_j.T @ np.linalg.inv(C_j @ C_j.T)
 
@@ -193,8 +220,11 @@ if __name__ == "__main__":
     print("Phase B Validation — HyCon2 Scenario 3 plant + Algorithm 1 estimator")
     print("=" * 65)
 
-    A, Bbar = build_plant()
-    A_f, Bbar_f = build_plant(h_override={5: FAULT_H5})
+    scheme = "D" if "--scheme=D" in sys.argv[1:] else "Dss"
+    build = build_plant_network if scheme == "D" else build_plant
+    A, Bbar = build()
+    A_f, Bbar_f = build(h_override={5: FAULT_H5})
+    print(f"Discretisation scheme: {scheme}")
 
     # Check 1: sparsity pattern and open-loop stability
     print("\n[1] Continuous-time matrices")
@@ -207,16 +237,20 @@ if __name__ == "__main__":
     print(f"  A^c_12[1,0] = P12/(2 H1) = {A_cont_cross(1, 2)[1, 0]:.4f},  A^c_21[1,0] = P12/(2 H2) = {A_cont_cross(2, 1)[1, 0]:.4f}  (not transposes)")
 
     # Check 2: discrete stability and A_ij structure
-    print("\n[2] Dss discretisation (Ts = 1 s)")
+    print(f"\n[2] {scheme} discretisation (Ts = 1 s)")
     for i in AREAS:
         rho = max(abs(np.linalg.eigvals(A[i][i])))
         cols_ok = all(np.abs(A[i][j][:, 1:]).max() < 1e-13 for j in NEIGHBOURS[i])
-        print(f"  area {i}: rho(A_ii) = {rho:.4f} [{'OK' if rho < 1 else 'UNSTABLE'}],  A_ij nonzero only in column 0: {cols_ok}")
+        others = [j for j in A[i] if j != i and j not in NEIGHBOURS[i]]
+        far = max((np.abs(A[i][j]).max() for j in others), default=0.0)
+        print(f"  area {i}: rho(A_ii) = {rho:.4f} [{'OK' if rho < 1 else 'UNSTABLE'}],  A_ij nonzero only in column 0: {cols_ok}"
+              + (f",  largest entry in non-neighbour blocks {far:.1e} (ignored by the estimator)" if others else ""))
     print("  A_25 =\n", A[2][5])
 
     print(f"\n[3] Fault H5: {INERTIA[5]:.0f} -> {FAULT_H5:.0f} at k = {FAULT_K}")
     print(f"  |dA_55|max = {np.abs(A_f[5][5] - A[5][5]).max():.3f}   |dA_52|max = {np.abs(A_f[5][2] - A[5][2]).max():.3f}   "
-          f"|dBbar_5|max = {np.abs(Bbar_f[5] - Bbar[5]).max():.3f}   (all three change; A_25 does not: {np.abs(A_f[2][5] - A[2][5]).max():.1e})")
+          f"|dBbar_5|max = {np.abs(Bbar_f[5] - Bbar[5]).max():.3f}   |dA_25|max = {np.abs(A_f[2][5] - A[2][5]).max():.1e}"
+          + ("  (Dss: only area 5's row changes)" if scheme == "Dss" else "  (D: the fault spreads into every area's blocks)"))
 
     # Check 4: coupling cancelled, Riccati residual, Phi > 0
     print("\n[4] Algorithm 1: coupling gains, Q~, Riccati, local gains")
@@ -237,14 +271,20 @@ if __name__ == "__main__":
     for i, m in stability_metrics(A, L).items():
         print(f"  area {i}: varsigma = {m['varsigma']}, rho(A_ii - L_ii C) = {m['rho_plain']:.3f}, "
               f"rho(F~_ii) = {m['rho_tilde']:.3f} [{'OK' if m['rho_tilde'] < 1 else '>=1'}], beta_i = {m['beta']:.1e} [{'OK' if m['beta'] < 1 else 'FAIL'}]")
-    print("  With A_ij - L_ij C = 0 exactly, the error dynamics are block-diagonal and stable by Kalman-filter theory")
-    print("  regardless of the sufficient condition; rho(F~_ii) < 1 additionally means [2]'s B_i(k) bound converges.")
+    if scheme == "Dss":
+        print("  With A_ij - L_ij C = 0 exactly, the error dynamics are block-diagonal and stable by Kalman-filter theory")
+        print("  regardless of the sufficient condition; rho(F~_ii) < 1 additionally means [2]'s B_i(k) bound converges.")
+    else:
+        print("  The coupling is not cancelled (A_ij - L_ij C != 0), so the areas' errors interact and each residual is")
+        print("  only approximately white ([1] eq. (11)); beta_i < 1 still guarantees stability ([2] Prop. 1).")
 
-    out = RESULTS_DIR / "estimator_gains.npz"
+    # under D the fault changes every area's blocks, so all rows are saved
+    fault_rows = AREAS if scheme == "D" else [5]
+    out = RESULTS_DIR / ("estimator_gains_D.npz" if scheme == "D" else "estimator_gains.npz")
     np.savez(out,
              areas=np.array(AREAS), Ts=TS, fault_k=FAULT_K, C=C_MAT, Q=Q_MAT, R=R_MAT,
              **{f"A_{i}_{j}": A[i][j] for i in AREAS for j in A[i]},
-             **{f"Afault_5_{j}": A_f[5][j] for j in A_f[5]},
+             **{f"Afault_{i}_{j}": A_f[i][j] for i in fault_rows for j in A_f[i]},
              **{f"Bbar_{i}": Bbar[i] for i in AREAS}, Bbarfault_5=Bbar_f[5],
              **{f"L_{i}_{j}": L[i][j] for i in AREAS for j in L[i]},
              **{f"Phi_{i}": Phi[i] for i in AREAS},

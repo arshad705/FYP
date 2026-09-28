@@ -14,15 +14,18 @@ Pipeline
 
 Assumptions not stated in [1] (to confirm with supervisor):
     - u_i = 0: [1] eqs. (1), (4), (21) have no input term, and no load profile covers 1e5 steps.
-    - Discretisation: Phase B's per-area ZOH; post-fault area 5 re-discretised on its own.
+    - Discretisation: Phase B's per-area ZOH (Dss); post-fault area 5 re-discretised on its own.
+      With --scheme=D: the whole network discretised at once (run phase_b.py --scheme=D first);
+      the estimator keeps only tie-line neighbours, the plant uses every block.
     - Fig. 3 baseline: |z_check_{i,l}| against a constant alpha_1 = 4.57 ([1] Fig. 3 caption),
       with [2]'s 1% value 2.57 shown dashed.
     - x(0) = x_hat(0) = 0 as in [2] Sec. V (residual variance settles within 3 steps).
 
-Run phase_a.py and phase_b.py first.
-Output: phase_c_results.npz, fig2_statistical.png, fig3_residual.png.
+Run phase_a.py and phase_b.py first.  Usage: python phase_c.py [--scheme=D]
+Output: phase_c_results.npz, fig2_statistical.png, fig3_residual.png (suffix _D with --scheme=D).
 """
 
+import sys
 import numpy as np
 from pathlib import Path
 import matplotlib
@@ -43,16 +46,21 @@ FIRST_V = WINDOW_LEN + BLOCK_LEN - 2         # first k with a valid v_{k,T} (Pha
 
 # Step 1 — Load Phase B output back into the dict layout of phase_b.py
 def load_gains(path: Path) -> dict:
-    """Returns A[i][j], A_fault[i][j], L[i][j], Gamma_inv_sqrt[i] for j in N_i U {i}, plus C, Q, R."""
+    """
+    Returns A[i][j] and A_fault[i][j] for every block saved (N_i U {i} under Dss, all areas under D),
+    L[i][j] for j in N_i U {i}, Gamma_inv_sqrt[i], plus C, Q, R.
+    """
     d = np.load(path)
     A, L, G = {}, {}, {}
     for i in AREAS:
-        A[i] = {j: d[f"A_{i}_{j}"] for j in [i] + NEIGHBOURS[i]}
+        A[i] = {j: d[f"A_{i}_{j}"] for j in AREAS if f"A_{i}_{j}" in d.files}
         L[i] = {j: d[f"L_{i}_{j}"] for j in [i] + NEIGHBOURS[i]}
         G[i] = d[f"Gamma_inv_sqrt_{i}"]
     A_fault = {i: dict(A[i]) for i in AREAS}
-    for j in [5] + NEIGHBOURS[5]:                     # H5 appears only in area 5's row (Phase B check [3])
-        A_fault[5][j] = d[f"Afault_5_{j}"]
+    for i in AREAS:                                   # Dss saves area 5's row only; D saves every row
+        for j in A[i]:
+            if f"Afault_{i}_{j}" in d.files:
+                A_fault[i][j] = d[f"Afault_{i}_{j}"]
     return dict(A=A, A_fault=A_fault, L=L, Gamma_inv_sqrt=G, C=d["C"], Q=d["Q"], R=d["R"])
 
 
@@ -64,8 +72,9 @@ def simulate(gains: dict, n_steps: int = N_STEPS, fault_k: int = FAULT_K, seed: 
         z~_i(k)      = y_i(k) - C x_hat_i(k)                               local residual, z_i = y_i
         z_check_i(k) = Gamma_i^{-1/2} z~_i(k)                              [1] eq. (10)
         x_hat_i(k+1) = sum_{j in N_i U {i}} A_ij x_hat_j(k) + L_ij z~_j(k)   [1] eq. (4), nominal A
-        x_i(k+1)     = sum_{j in N_i U {i}} A_ij(k) x_j(k) + w_i(k)          A_ij(k) post-fault for k > fault_k
-    The estimator keeps the pre-fault model: that mismatch is the anomaly.
+        x_i(k+1)     = sum_{j} A_ij(k) x_j(k) + w_i(k)                       A_ij(k) post-fault for k > fault_k
+    The estimator keeps the pre-fault model: that mismatch is the anomaly. The plant sums over every
+    block it has; under scheme D that includes non-neighbour blocks the estimator does not model.
     Returns z_check[i], shape (n_steps, 2), for each area.
     """
     A, A_fault, L = gains["A"], gains["A_fault"], gains["L"]
@@ -98,7 +107,8 @@ def simulate(gains: dict, n_steps: int = N_STEPS, fault_k: int = FAULT_K, seed: 
             plant = w[i][k].copy()                              # [1] eq. (30), u_i = 0
             for j in [i] + NEIGHBOURS[i]:
                 est = est + A[i][j] @ x_hat[j] + L[i][j] @ resid[j]
-                plant = plant + A_plant[i][j] @ x[j]
+            for j, A_ij in A_plant[i].items():
+                plant = plant + A_ij @ x[j]
             new_x_hat[i] = est
             new_x[i] = plant
         x, x_hat = new_x, new_x_hat
@@ -173,8 +183,12 @@ if __name__ == "__main__":
     print("Phase C Validation — Power network + statistical detector ([1] Sec. V)")
     print("=" * 65)
 
-    stats_path, gains_path = RESULTS_DIR / "detector_stats.npz", RESULTS_DIR / "estimator_gains.npz"
-    for p, script in [(stats_path, "phase_a.py"), (gains_path, "phase_b.py")]:
+    scheme = "D" if "--scheme=D" in sys.argv[1:] else "Dss"
+    suffix = "_D" if scheme == "D" else ""
+    stats_path = RESULTS_DIR / "detector_stats.npz"
+    gains_path = RESULTS_DIR / f"estimator_gains{suffix}.npz"
+    print(f"Discretisation scheme: {scheme}")
+    for p, script in [(stats_path, "phase_a.py"), (gains_path, f"phase_b.py{' --scheme=D' if suffix else ''}")]:
         if not p.exists():
             raise SystemExit(f"Missing {p.name}: run {script} first.")
     stats, gains = load_stats(stats_path), load_gains(gains_path)
@@ -227,10 +241,10 @@ if __name__ == "__main__":
                   f"  |  > {ALPHA_1}: before {np.mean(z[pre] > ALPHA_1):.5f}, after {np.mean(z[post] > ALPHA_1):.5f}")
     print("  Theory for N(0,1): P(|z| > 2.57) = 0.0102, P(|z| > 4.57) = 4.9e-6.")
 
-    fig2, fig3 = RESULTS_DIR / "fig2_statistical.png", RESULTS_DIR / "fig3_residual.png"
+    fig2, fig3 = RESULTS_DIR / f"fig2_statistical{suffix}.png", RESULTS_DIR / f"fig3_residual{suffix}.png"
     plot_fig2(det["v"], fig2)
     plot_fig3(z_check, fig3)
-    np.savez(RESULTS_DIR / "phase_c_results.npz",
+    np.savez(RESULTS_DIR / f"phase_c_results{suffix}.npz",
              **{f"zcheck_{i}": z_check[i] for i in AREAS},
              **{f"v_{i}_{l}": det["v"][(i, l)] for i in AREAS for l in [1, 2]},
              fault_k=FAULT_K, n_steps=N_STEPS, seed=SEED)
