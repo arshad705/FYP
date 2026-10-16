@@ -120,8 +120,10 @@ def detect_all(z_check: dict, stats: dict) -> dict:
 
 
 # Step 6 — Figures  [1] Figs. 2 and 3
-def plot_fig2(v: dict, path: Path, fault_k: int = FAULT_K) -> None:
+def plot_fig2(v: dict, path: Path, fault_k: int = FAULT_K,
+              title: str = "Statistical approach: $v_{k,T}$, fault $H_5$: 10 → 2 at $k$ = 5×10⁴  ([1] Fig. 2)") -> None:
     """v_{k,T} per area (rows) and channel (columns), log y-axis as in [1] Fig. 2."""
+    top = max(1000, 1.2 * max(np.nanmax(x) for x in v.values()))  # grows only for very large v
     fig, axes = plt.subplots(len(AREAS), 2, figsize=(10, 9), sharex=True)
     for r, i in enumerate(AREAS):
         for l in [1, 2]:
@@ -130,17 +132,18 @@ def plot_fig2(v: dict, path: Path, fault_k: int = FAULT_K) -> None:
             ax.axhline(100, color="grey", ls=":", lw=1)           # chi2_100 mean, for reference
             ax.axvline(fault_k, color="red", ls="--", lw=0.8)
             ax.set_yscale("log")
-            ax.set_ylim(40, 1000)                                 # same range on every panel
+            ax.set_ylim(40, top)                                  # same range on every panel
             ax.set_ylabel(f"$v_{{k,T}}({i},{l})$")
     for ax in axes[-1]:
         ax.set_xlabel("Time step $k$")
-    fig.suptitle("Statistical approach: $v_{k,T}$, fault $H_5$: 10 → 2 at $k$ = 5×10⁴  ([1] Fig. 2)")
+    fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)
 
 
-def plot_fig3(z_check: dict, path: Path, fault_k: int = FAULT_K) -> None:
+def plot_fig3(z_check: dict, path: Path, fault_k: int = FAULT_K,
+              title: str = "Threshold-based residual approach: |ž|  ([1] Fig. 3)") -> None:
     """|z_check_{i,l}| with alpha_1 = 4.57 (red) and 2.57 (dashed), log y-axis as in [1] Fig. 3."""
     fig, axes = plt.subplots(len(AREAS), 2, figsize=(10, 9), sharex=True)
     for r, i in enumerate(AREAS):
@@ -156,7 +159,7 @@ def plot_fig3(z_check: dict, path: Path, fault_k: int = FAULT_K) -> None:
     axes[0, 1].legend(loc="lower right", fontsize=7)
     for ax in axes[-1]:
         ax.set_xlabel("Time step $k$")
-    fig.suptitle("Threshold-based residual approach: |ž|  ([1] Fig. 3)")
+    fig.suptitle(title)
     fig.tight_layout()
     fig.savefig(path, dpi=150)
     plt.close(fig)

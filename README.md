@@ -19,6 +19,7 @@ test on its residuals.
 | **A** | [`phase_a.py`](phase_a.py) | Build the statistical detector and check it on synthetic residuals where the correct answer is known. | `detector_stats.npz` |
 | **B** | [`phase_b.py`](phase_b.py) | Build the 4-area power network model (plus a post-fault version) and design one estimator per area. | `estimator_gains.npz` |
 | **C** | [`phase_c.py`](phase_c.py) | Connect B to A: simulate the network with the inertia fault, feed each area's normalised residual into the detector, and reproduce [1] Figs. 2 and 3. | `phase_c_results.npz`, `fig2_statistical.png`, `fig3_residual.png` |
+| C | [`phase_c_attacks.py`](phase_c_attacks.py) | Residual-level attack experiment: from healthy network residuals, replace area 5's stored residual with the paper's intricate (27) or periodic-replay construction and run both detectors. The estimators never receive attacked measurements. | `phase_c_attacks_results.npz`, `fig2_attack_*.png`, `fig3_attack_*.png` |
 
 ## Current result
 
@@ -26,6 +27,7 @@ The statistical detector finds the fault that a simple threshold misses, as [1] 
 
 - **Statistical test ([1] Fig. 2):** in area 5's frequency channel, $v_{k,T}$ jumps from about 100 to about 350 after the fault, and the alarm stays on. The other areas stay near 100.
 - **Threshold test ([1] Fig. 3):** with the paper's threshold of 4.57, only 0.04 % of post-fault steps cross it, so the fault is effectively missed.
+- **Attacks (residual-level experiment):** applying the paper's random-sign intricate attack (27) or a period-400 replay to area 5's stored residual raises $v$ in area 5 by 2.2–2.5×, with frequent alarms (90–100 % of overlapping windows in one run), while the threshold sees no change. The estimators never see attacked measurements, and the replay result depends on the recording; see [docs/phase_c.md](docs/phase_c.md#attack-scenarios).
 
 Two details don't yet match the paper: area 5's angle channel doesn't respond, and there is no residual spike at the fault. See [docs/phase_c.md](docs/phase_c.md#open-gaps) for the open gaps.
 
@@ -45,6 +47,7 @@ pip install -r requirements.txt
 python phase_b.py               # fast
 python phase_a.py               # slower: k-means + several 100 000-step detector runs
 python phase_c.py               # slowest: 100 000-step network simulation; needs A and B first
+python phase_c_attacks.py       # residual-level attack experiment; needs A and B first
 ```
 
 Each script prints a numbered list of validation checks, each marked `[OK]` or
