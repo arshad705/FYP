@@ -243,7 +243,10 @@ if __name__ == "__main__":
         print(f"  gamma in {'{-1,+1}' if sign_set == 'pm1' else '{0,1}  '}: v before {np.nanmean(v[:k0]):6.1f}, after {np.nanmean(v[k0+100:]):7.1f} | "
               f"post-attack var {post.var():.2f}, zeros {(post == 0).mean():.2f}, "
               f"lag-1 acf {np.corrcoef(post[:-1], post[1:])[0, 1]:+.3f}, KS vs N(0,1) {kstest(post, 'norm').statistic:.3f}")
-    print("  -> {-1,+1} passes every simple check and is still detected; {0,1} is not stealthy at all.")
+    print(f"  -> At T = 100, compare scores with the cutoff {chi2.ppf(ALPHA, N_CODEBOOK):.2f}. "
+          "The balanced-sign mean score is below this cutoff in this run; a score increase alone does not establish reliable detection.")
+    print("     Balanced signs approximately preserve the nominal marginal and ordinary lag-1 correlation; "
+          "{0,1} signs instead introduce zeros and halve the marginal variance.")
 
     out = RESULTS_DIR / "detector_stats.npz"
     save_stats(out, codebook, u_star, Sigma, Sigma_inv)
