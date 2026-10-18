@@ -27,8 +27,10 @@ Assumptions not stated in [1] (to confirm with supervisor):
       T_bar in {100, 400, 800, 1600} in the sweep, all with this one recording position.
 
 Detector (Phase A): L = 3 sets the time span inside each tested block (dependence at lags <= 2); T = 800 sets
-how many block indicators are averaged. Neither gives a replay-period boundary: check [5] reports one
-recording per period, and check [6] shows independent recordings on either side of the threshold.
+how many block indicators are averaged. For periodically repeated i.i.d. healthy recordings and fixed L=3,
+periods P < T generally inflate the score through repeated block counts (roughly by T/P when T/P is an integer).
+Periods P >= T can resemble healthy windows. This is a typical sensitivity trend, not guaranteed detection:
+checks [5]-[6] use individual recordings and show variability, not absence of an expected period effect.
 One run's alarm share is a fraction of overlapping windows, not a detection probability.
 
 Seeds: SEED (phase_c.py) for the network, ATTACK_SEED for gamma and r(0); the codebook ("checkpoint bank")
@@ -175,7 +177,7 @@ if __name__ == "__main__":
         results.update({f"{name}_zcheck_{ATTACK_AREA}": z_att[ATTACK_AREA]})
         results.update({f"{name}_v_{i}_{l}": det["v"][(i, l)] for i in AREAS for l in [1, 2]})
 
-    # One recording per period: what this recording does, not a rule about the period (see [6])
+    # One recording per period: illustrates variability, not typical detection probability.
     n += 1
     print(f"\n[{n}] Replay period sweep, area {ATTACK_AREA}, T = {WINDOW_LEN}, default recording "
           "(last T_bar healthy residuals before k0)")
@@ -197,7 +199,9 @@ if __name__ == "__main__":
         v_rep, alarm_rep = replay_score(period, seed, stats)
         print(f"  period {period:4d}, recording default_rng({seed}).standard_normal({period}): "
               f"v = {v_rep:.2f} -> {'alarm' if alarm_rep else 'no alarm'}")
-    print("  Whether a replay crosses the threshold depends on the recording; L and T give no period boundary.")
+    print("  These individual recordings show variability, not typical detection probabilities.")
+    print("  For periodic i.i.d. healthy recordings at fixed L=3, P<T generally inflates the score "
+          "(roughly T/P when T/P is an integer); P>=T can resemble healthy windows. Neither outcome is guaranteed.")
 
     np.savez(RESULTS_DIR / "phase_c_attacks_results.npz", **results, attack_k=ATTACK_K, n_steps=N_STEPS,
              tau_bar=TAU_BAR, v_bar=V_BAR, replay_T=REPLAY_T, network_seed=SEED, attack_seed=ATTACK_SEED,

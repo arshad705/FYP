@@ -215,8 +215,11 @@ more than 2 steps apart, such as a replay's lag of $\bar T$, never falls inside 
 how many block indicators are averaged into $u_{k,T}$. When $\bar T < T$ the window holds repeated
 copies of the same blocks, so $u_{k,T}$ averages fewer distinct blocks and tends to deviate more from
 its nominal value. When $\bar T$ divides $T$, every fully replayed window holds the same blocks, so $v$
-stays at one value for the whole replay (the flat line in the replay figure). Whether that value
-crosses the threshold depends on the recording. Neither $L$ nor $T$ sets a replay-period boundary.
+stays at one value for the whole replay (the flat line in the replay figure). For periodically
+repeated i.i.d. healthy recordings, $\bar T < T$ generally inflates the score (roughly by $T/\bar T$ when
+$T/\bar T$ is an integer), while $\bar T \ge T$ can resemble healthy windows. This is a typical
+sensitivity trend, not guaranteed detection: the two recordings above are single draws and show
+variability, not the absence of a period effect.
 
 [1] Remark 4.2 says replay "can be easily detected by checking the correlation between
 $\tilde z_i(k)$ and $\tilde z_i(k+\bar T)$ using Algorithm 2". With $L$ = 3, Algorithm 2 can't test a
