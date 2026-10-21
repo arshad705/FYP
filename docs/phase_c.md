@@ -238,6 +238,22 @@ correlation at lag $\bar T$ directly; the response here comes from repeated bloc
 
 ![Statistical approach, residual-level attack (27), gamma in {-1,+1}](img/fig2_attack_intricate_pm1.png)
 
+![Threshold approach, residual-level attack (27), gamma in {-1,+1}](img/fig3_attack_intricate_pm1.png)
+
+**Intricate attack, $\gamma \in \{-1,+1\}$:** in the statistical plot, both area 5 panels step up at the
+red dashed line and stay up, while areas 1–3 stay near 100. The threshold plot shows no visible change.
+
+![Statistical approach, residual-level periodic replay, period 400](img/fig2_attack_replay.png)
+
+![Threshold approach, residual-level periodic replay, period 400](img/fig3_attack_replay.png)
+
+**Replay, $\bar T$ = 400:** both area 5 panels jump to a flat level after $k_0$. The level is flat because
+$\bar T$ divides $T$, so every fully replayed window holds the same blocks. The threshold plot shows no
+visible change.
+
+These copies are a snapshot of the default-seed run. Re-running `phase_c_attacks.py` writes fresh
+figures next to the script, not here.
+
 ## Open gaps
 
 Ordered by how much each could change the figures.
